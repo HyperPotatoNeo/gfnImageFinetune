@@ -973,9 +973,10 @@ def _train_policy_func(
       latents=batch_state.cuda(),
       next_latents=batch_next_state.cuda(),
       ts=batch_timestep.cuda(),
-      unet_copy=unet_copy,
+      unet_copy=None,#unet_copy,
       is_ddp=is_ddp,
   )
+  kl_regularizer = torch.sum(log_pf_post-log_pf_prior)
   log_pf_post_sum = log_pf_post_sum - log_prob.detach().sum() + log_prob.sum()
   adv = batch_final_reward.cuda().mean()#.reshape([args.p_batch_size, 1])
   loss = (log_pf_post_sum/args.reward_weight + logC - log_pf_prior_sum/args.reward_weight - adv)**2
