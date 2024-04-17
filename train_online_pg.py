@@ -826,6 +826,7 @@ def _collect_rollout(args, pipe, is_ddp, batch, calculate_reward, state_dict):
     # collect the rollout data from the custom sampling function
     # (modified in pipeline_stable_diffusion.py and scheduling_ddim.py)
 
+    with torch.no_grad():
       (
           image,
           latents_list,
