@@ -279,6 +279,12 @@ def parse_args():
       help="The beta1 parameter for the Adam optimizer.",
   )
   parser.add_argument(
+    "--beta",
+    type=float,
+    default=1.0,
+    help="The beta parameter for the Adam optimizer.",
+    )
+  parser.add_argument(
       "--adam_beta2",
       type=float,
       default=0.999,
@@ -1431,7 +1437,7 @@ def main():
 
     for _ in range(args.p_step):
       rewards = state_dict["final_reward"].reshape([50,state_dict["state"].shape[0]//50])[0].view(-1)
-      image_indicies = prioritized_sample(rewards.cpu().numpy(), args.gradient_accumulation_steps, beta=0.5)
+      image_indicies = prioritized_sample(rewards.cpu().numpy(), args.gradient_accumulation_steps, beta=args.beta)
       optimizer.zero_grad()
       for accum_step in range(int(args.gradient_accumulation_steps)):
         if accum_step < int(args.gradient_accumulation_steps) - 1:
