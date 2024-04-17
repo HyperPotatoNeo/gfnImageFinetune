@@ -477,6 +477,8 @@ def parse_args():
       default=100,
       help="save model every save_interval steps",
   )
+
+
   parser.add_argument(
       "--num_samples",
       type=int,
@@ -926,6 +928,13 @@ class TrainPolicyFuncData:
   tot_grad_norm: float = 0
 
 
+def prioritized_sample(reward, batch_size, beta=1.0):
+    """Prioritized sampling."""
+    prob = np.exp(reward*beta)
+    prob /= prob.sum()
+    indices = np.random.choice(len(reward), batch_size, p=prob)
+    return indices
+
 def _train_policy_func(
     args,
     state_dict,
@@ -938,12 +947,11 @@ def _train_policy_func(
     tpfdata,
     value_function,
     logC,
+    img_idx,
 ):
   """Trains the policy function."""
   with torch.no_grad():
-    img_idx = get_random_indices(
-        state_dict["state"].shape[0]//50, 1
-    )[0]
+
     sample_indices = get_random_indices(
         50, args.p_batch_size
     )
@@ -1389,11 +1397,12 @@ def main():
     # fix batchnorm
     unet.eval()
 
-    batch = _get_batch(
-        data_iter_loader, _my_data_iterator, prompt_list, args, accelerator
-    )
-    _collect_rollout(args, pipe, is_ddp, batch, calculate_reward, state_dict, unet_copy)
-    _trim_buffer(buffer_size, state_dict)
+    for i in range(args.g_step):
+        batch = _get_batch(
+            data_iter_loader, _my_data_iterator, prompt_list, args, accelerator
+        )
+        _collect_rollout(args, pipe, is_ddp, batch, calculate_reward, state_dict, unet_copy)
+    _trim_buffer(buffer_size*args.g_step, state_dict)
 
     if args.v_flag == 1:
       tot_val_loss = 0
@@ -1418,7 +1427,11 @@ def main():
 
     # policy learning
     tpfdata = TrainPolicyFuncData()
+
+
     for _ in range(args.p_step):
+      rewards = state_dict["final_reward"].reshape([50,state_dict["state"].shape[0]//50])[0].view(-1)
+      image_indicies = prioritized_sample(rewards.cpu().numpy(), args.gradient_accumulation_steps, beta=0.5)
       optimizer.zero_grad()
       for accum_step in range(int(args.gradient_accumulation_steps)):
         if accum_step < int(args.gradient_accumulation_steps) - 1:
@@ -1435,6 +1448,7 @@ def main():
                 tpfdata,
                 value_function,
                 logC,
+                image_indicies[accum_step],
             )
         else:
           _train_policy_func(
@@ -1449,6 +1463,7 @@ def main():
               tpfdata,
               value_function,
               logC,
+              image_indicies[accum_step],
           )
       if accelerator.sync_gradients:
         norm = accelerator.clip_grad_norm_(unet.parameters(), args.clip_norm)
