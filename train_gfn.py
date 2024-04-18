@@ -416,6 +416,11 @@ def parse_args():
       default=0,
   )
   parser.add_argument(
+      "--hinge_loss",
+      type=int,
+      default=0,
+  )
+  parser.add_argument(
       "--g_step", type=int, default=1, help="The number of sampling steps"
   )
   parser.add_argument(
@@ -668,7 +673,7 @@ def _update_output_dir(args):
   else:
     data_log = args.prompt_path.split("/")[-2] + "_"
     data_log += args.prompt_category + "/"
-  learning_log = "p_lr" + str(args.learning_rate) + "_s" + str(args.p_step)
+  learning_log = "p_lr" + str(args.learning_rate) + "_c_lr" + str(args.c_learning_rate) + "_s" + str(args.p_step) + "_hingeloss" + str(args.hinge_loss)
   learning_log += (
       "_b"
       + str(args.p_batch_size)
@@ -979,7 +984,11 @@ def _train_policy_func(
   kl_regularizer = torch.sum(log_pf_post-log_pf_prior)
   log_pf_post_sum = log_pf_post_sum - log_prob.detach().sum() + log_prob.sum()
   adv = batch_final_reward.cuda().mean()#.reshape([args.p_batch_size, 1])
-  loss = (log_pf_post_sum/args.reward_weight + logC - log_pf_prior_sum/args.reward_weight - adv)**2
+  if args.hinge_loss:
+    target = -(logC - log_pf_prior_sum/args.reward_weight - adv)
+    loss = torch.nn.functional.huber_loss(log_pf_post_sum/args.reward_weight, target)
+  else:
+    loss = (log_pf_post_sum/args.reward_weight + logC - log_pf_prior_sum/args.reward_weight - adv)**2
   #if count > args.kl_warmup:
   #  loss += args.kl_weight * kl_regularizer.mean()
   loss = loss / (args.gradient_accumulation_steps)
