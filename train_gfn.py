@@ -52,7 +52,13 @@ from tqdm.auto import tqdm
 import transformers
 from transformers import CLIPModel, CLIPProcessor  # pylint: disable=g-multiple-import
 from transformers import CLIPTextModel, CLIPTokenizer  # pylint: disable=g-multiple-import
-import utils
+import dpok_utils as utils
+
+import torchvision.transforms as transforms
+from PIL import Image
+import timm
+import glob
+from torch.nn.functional import cosine_similarity
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -817,7 +823,7 @@ def _trim_buffer(buffer_size, state_dict):
 
 def _save_model(args, count, is_ddp, accelerator, unet):
   """Saves UNET model."""
-  save_path = os.path.join(args.output_dir, f"save_{count}")
+  save_path = os.path.join(args.output_dir, f"save_gfn_{count}")
   print(f"Saving model to {save_path}")
   if is_ddp:
     unet_to_save = copy.deepcopy(accelerator.unwrap_model(unet)).to(
@@ -837,6 +843,7 @@ def _collect_rollout(args, pipe, is_ddp, batch, calculate_reward, state_dict, un
     # (modified in pipeline_stable_diffusion.py and scheduling_ddim.py)
     with torch.no_grad():
       (
+          image_latents,
           image,
           latents_list,
           unconditional_prompt_embeds,
@@ -844,11 +851,11 @@ def _collect_rollout(args, pipe, is_ddp, batch, calculate_reward, state_dict, un
           log_prob_list,
           old_log_prob_list,
           _,
-      ) = pipe.forward_collect_traj_ddim(prompt=batch, is_ddp=is_ddp, unet_copy=unet_copy, gfn=True)
+      ) = pipe.forward_collect_traj_ddim(prompt=batch, is_ddp=is_ddp, unet_copy=unet_copy, gfn=True, output_type = 'pil')
       reward_list = []
       txt_emb_list = []
       for i in range(len(batch)):
-        reward, txt_emb = calculate_reward(image[i], batch[i])
+        reward, txt_emb = calculate_reward(image_latents[i], batch[i])
         reward_list.append(reward)
         txt_emb_list.append(txt_emb)
       reward_list = torch.stack(reward_list).detach().cpu()
@@ -882,7 +889,7 @@ def _collect_rollout(args, pipe, is_ddp, batch, calculate_reward, state_dict, un
             (state_dict["old_log_prob"], old_log_prob_list[i])
         )
       del (
-          image,
+          image_latents,
           latents_list,
           unconditional_prompt_embeds,
           guided_prompt_embeds,
@@ -894,6 +901,7 @@ def _collect_rollout(args, pipe, is_ddp, batch, calculate_reward, state_dict, un
           txt_emb,
       )
       torch.cuda.empty_cache()
+      return image
 
 
 def _train_value_func(value_function, state_dict, accelerator, args):
@@ -1058,6 +1066,16 @@ def main():
       subfolder="text_encoder",
       revision=args.revision,
   )
+
+  # DINO embedding for measuring diversity
+  embedding_encoder = torch.hub.load('facebookresearch/dino:main', 'dino_vits16')
+  embedding_encoder.eval()
+  embedding_encoder.to(accelerator.device)  
+  transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
 
   weight_dtype = torch.float32
   if accelerator.mixed_precision == "fp16":
@@ -1401,7 +1419,7 @@ def main():
     batch = _get_batch(
         data_iter_loader, _my_data_iterator, prompt_list, args, accelerator
     )
-    _collect_rollout(args, pipe, is_ddp, batch, calculate_reward, state_dict, unet_copy)
+    image = _collect_rollout(args, pipe, is_ddp, batch, calculate_reward, state_dict, unet_copy)
     _trim_buffer(buffer_size, state_dict)
 
     if args.v_flag == 1:
@@ -1466,6 +1484,29 @@ def main():
       lr_scheduler.step()
       if accelerator.is_main_process:
         print(f"count: [{count} / {args.max_train_steps // args.p_step}]")
+        
+        if count % 5 == 0:
+            images = [transform(x).unsqueeze(0).to(accelerator.device) for x in image]
+            # Extract features
+            with torch.no_grad():
+                features = [embedding_encoder(x).squeeze(0) for x in images]
+
+            # Compute pairwise cosine similarity
+            n = len(features)
+            similarity_matrix = torch.zeros((n, n), device=accelerator.device)
+            for i in range(n):
+                for j in range(i + 1, n):
+                    similarity = cosine_similarity(features[i].unsqueeze(0), features[j].unsqueeze(0))
+                    similarity_matrix[i][j] = similarity
+                    similarity_matrix[j][i] = similarity  # since cosine similarity is symmetric
+
+            # Calculate average pairwise cosine similarity (excluding self-similarity)
+            upper_tri_indices = torch.triu_indices(row=n, col=n, offset=1)  # Offset 1 to exclude diagonal
+            average_similarity = torch.mean(similarity_matrix[upper_tri_indices[0], upper_tri_indices[1]])
+
+            # Print the average cosine similarity
+            print("Average Pairwise Cosine Similarity:", average_similarity.item())
+            accelerator.log({"average_similarity": average_similarity.item()}, step=count)            
         print("train_reward", torch.mean(state_dict["final_reward"]).item())
         accelerator.log(
             {"train_reward": torch.mean(state_dict["final_reward"]).item()},

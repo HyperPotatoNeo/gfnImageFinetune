@@ -300,10 +300,10 @@ class StableDiffusionPipelineExtended(StableDiffusionPipeline):
       # 8. Post-processing
       latents = latents.detach()
       latents = latents.to(prompt_embeds.dtype)
-      image = self.decode_latents(latents)
+      image_latent = self.decode_latents(latents)
 
       # 10. Convert to PIL
-      image = self.numpy_to_pil(image)
+      image = self.numpy_to_pil(image_latent)
     else:
       # 8. Post-processing
       image = self.decode_latents(latents)
@@ -331,6 +331,7 @@ class StableDiffusionPipelineExtended(StableDiffusionPipeline):
 
     if gfn:
       return (
+        image_latent,
         image,
         latents_list,
         unconditional_prompt_embeds.detach().cpu(),
@@ -340,6 +341,7 @@ class StableDiffusionPipelineExtended(StableDiffusionPipeline):
         kl_path,
     )
     return (
+        image_latent,
         image,
         latents_list,
         unconditional_prompt_embeds.detach().cpu(),
