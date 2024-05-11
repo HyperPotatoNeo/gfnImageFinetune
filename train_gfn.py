@@ -537,6 +537,11 @@ def parse_args():
       default=1,
   )
   parser.add_argument(
+    "--annealing",
+    type=int,
+    default=0,
+  )
+  parser.add_argument(
       "--single_prompt",
       type=str,
       default="A green colored rabbit.",
@@ -992,11 +997,20 @@ def _train_policy_func(
   kl_regularizer = torch.sum(log_pf_post-log_pf_prior)
   log_pf_post_sum = log_pf_post_sum - log_prob.detach().sum() + log_prob.sum()
   adv = batch_final_reward.cuda().mean()#.reshape([args.p_batch_size, 1])
+  
+  if args.annealing == 1:
+    start_weight = 10.0
+    end_weight = 0.5
+    step_decay = (start_weight - end_weight) / 5000
+    reward_weight = max(end_weight, start_weight - step_decay * count)
+  else: 
+    reward_weight = args.reward_weight
+  
   if args.hinge_loss:
-    target = -(logC - log_pf_prior_sum/args.reward_weight - adv)
-    loss = torch.nn.functional.huber_loss(log_pf_post_sum/args.reward_weight, target)
+    target = -(logC - log_pf_prior_sum/reward_weight - adv)
+    loss = torch.nn.functional.huber_loss(log_pf_post_sum/reward_weight, target)
   else:
-    loss = (log_pf_post_sum/args.reward_weight + logC - log_pf_prior_sum/args.reward_weight - adv)**2
+    loss = (log_pf_post_sum/reward_weight + logC - log_pf_prior_sum/reward_weight - adv)**2
   #if count > args.kl_warmup:
   #  loss += args.kl_weight * kl_regularizer.mean()
   loss = loss / (args.gradient_accumulation_steps)
@@ -1030,6 +1044,17 @@ def main():
       log_with=args.report_to,
       project_config=accelerator_project_config,
   )
+
+  accelerator.init_trackers(
+      project_name="SDGFN",
+      config=vars(args),
+      init_kwargs={"wandb": {"entity": "swish"}}
+      )
+  if args.annealing == 1:
+    accelerator.trackers[0].run.name = f'GFN_{args.single_prompt}_rw{args.reward_weight}_annealing'
+  else:
+    accelerator.trackers[0].run.name = f'GFN_{args.single_prompt}_rw{args.reward_weight}'
+
 
   # Make one log on every process with the configuration for debugging.
   logging.basicConfig(

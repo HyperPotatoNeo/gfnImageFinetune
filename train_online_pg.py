@@ -200,7 +200,7 @@ def parse_args():
   parser.add_argument(
       "--max_train_steps",
       type=int,
-      default=10000,
+      default=25000,
       help=(
           "Total number of training steps to perform.  If provided, overrides"
           " num_train_epochs."
@@ -686,6 +686,7 @@ def _update_output_dir(args):
     value_log = "_v_lr" + str(args.v_lr) + "_b" + str(args.v_batch_size)
     value_log += "_s" + str(args.v_step)
     args.output_dir += value_log
+  args.output_dir += "_kl_" + str(args.kl_weight)
 
 
 def _calculate_reward_ir(
@@ -1013,6 +1014,12 @@ def main():
       log_with=args.report_to,
       project_config=accelerator_project_config,
   )
+  accelerator.init_trackers(
+      project_name="SDGFN",
+      config=vars(args),
+      init_kwargs={"wandb": {"entity": "swish"}}
+      )
+  accelerator.trackers[0].run.name = f'DPOK_{args.single_prompt}_rw{args.reward_weight}'
 
   # Make one log on every process with the configuration for debugging.
   logging.basicConfig(
