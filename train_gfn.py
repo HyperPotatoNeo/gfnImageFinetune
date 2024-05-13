@@ -24,7 +24,7 @@ import logging
 import os
 import pickle
 import random
-
+import wandb
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed  # pylint: disable=g-multiple-import
@@ -108,6 +108,27 @@ def parse_args():
           "The config of the Dataset, leave as None if there's only one config."
       ),
   )
+
+  parser.add_argument(
+    "--min_rw",
+    type=float,
+    default=0.5,
+    help="minimum reward value",
+  )
+  parser.add_argument(
+    "--max_rw",
+    type=float,
+    default=10.0,
+    help="maximum reward value",
+  )
+
+  parser.add_argument(
+    "--annealing_step",
+    type=int,
+    default=1500,
+    help="step for annealing",
+  )
+
   parser.add_argument(
       "--train_data_dir",
       type=str,
@@ -684,7 +705,7 @@ def _update_output_dir(args):
   else:
     data_log = args.prompt_path.split("/")[-2] + "_"
     data_log += args.prompt_category + "/"
-  learning_log = "p_lr" + str(args.learning_rate) + "_c_lr" + str(args.c_learning_rate) + "_s" + str(args.p_step) + "_hingeloss" + str(args.hinge_loss)
+  learning_log = "p_lr" + str(args.learning_rate) + "_c_lr" + str(args.c_learning_rate) + "_s" + str(args.p_step) + str(args.hinge_loss)
   learning_log += (
       "_b"
       + str(args.p_batch_size)
@@ -697,12 +718,16 @@ def _update_output_dir(args):
     start_log = "/pre_train/"
   else:
     start_log = "/sft/"
-  if args.reward_flag == 0:
-    args.output_dir += "/img_reward_{}/".format(args.reward_filter)
+  # if args.reward_flag == 0:
+  #   args.output_dir += "/img_reward_{}/".format(args.reward_filter)
+  # else:
+  #   args.output_dir += "/prev_reward_{}/".format(args.reward_filter)
+  
+  if args.annealing == 1:
+    args.output_dir += "_" + data_log  + "gfn/" + "annealing/" + "min_rw" + str(args.min_rw) + "_max_rw" + str(args.max_rw) + "_annealing_step" + str(args.annealing_step) + "_kl_" + str(args.kl_weight)
   else:
-    args.output_dir += "/prev_reward_{}/".format(args.reward_filter)
-  args.output_dir += start_log + data_log + "/" + learning_log + coeff_log
-
+  
+    args.output_dir += "_" + data_log  + "gfn/" + "constant/" + "rw_" +str(args.reward_weight) + "_kl_" + str(args.kl_weight)
 
 def _calculate_reward_ir(
     pipe,
@@ -999,13 +1024,13 @@ def _train_policy_func(
   adv = batch_final_reward.cuda().mean()#.reshape([args.p_batch_size, 1])
   
   if args.annealing == 1:
-    start_weight = 10.0
-    end_weight = 0.5
-    step_decay = (start_weight - end_weight) / 5000
-    reward_weight = max(end_weight, start_weight - step_decay * count)
+    start_weight = args.min_rw
+    end_weight = args.max_rw
+    step_decay = (end_weight - start_weight) / args.annealing_step
+    reward_weight = min(end_weight, start_weight + step_decay * count)
   else: 
     reward_weight = args.reward_weight
-  
+  accelerator.log({"reward_weight": reward_weight}, step=count)
   if args.hinge_loss:
     target = -(logC - log_pf_prior_sum/reward_weight - adv)
     loss = torch.nn.functional.huber_loss(log_pf_post_sum/reward_weight, target)
@@ -1051,7 +1076,7 @@ def main():
       init_kwargs={"wandb": {"entity": "swish"}}
       )
   if args.annealing == 1:
-    accelerator.trackers[0].run.name = f'GFN_{args.single_prompt}_rw{args.reward_weight}_annealing'
+    accelerator.trackers[0].run.name = f'GFN_{args.single_prompt}_min_rw{args.min_rw}_max_rw{args.max_rw}_annealing'
   else:
     accelerator.trackers[0].run.name = f'GFN_{args.single_prompt}_rw{args.reward_weight}'
 
@@ -1511,6 +1536,10 @@ def main():
         print(f"count: [{count} / {args.max_train_steps // args.p_step}]")
         
         if count % 5 == 0:
+            if count % 100 == 0:
+              for i, img in enumerate(image):
+                accelerator.log({"Image {}".format(i): wandb.Image(img)}, step=count)
+
             images = [transform(x).unsqueeze(0).to(accelerator.device) for x in image]
             # Extract features
             with torch.no_grad():
