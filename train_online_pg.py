@@ -24,7 +24,7 @@ import logging
 import os
 import pickle
 import random
-
+import wandb
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed  # pylint: disable=g-multiple-import
@@ -662,30 +662,14 @@ def _update_output_dir(args):
   else:
     data_log = args.prompt_path.split("/")[-2] + "_"
     data_log += args.prompt_category + "/"
-  learning_log = "p_lr" + str(args.learning_rate) + "_s" + str(args.p_step)
-  learning_log += (
-      "_b"
-      + str(args.p_batch_size)
-      + "_g"
-      + str(args.gradient_accumulation_steps)
-  )
-  learning_log += "_l" + str(args.lora_rank)
-  coeff_log = "_kl" + str(args.kl_weight) + "_re" + str(args.reward_weight)
-  if args.kl_warmup > 0:
-    coeff_log += "_klw" + str(args.kl_warmup)
-  if args.sft_initialization == 0:
-    start_log = "/pre_train/"
-  else:
-    start_log = "/sft/"
-  if args.reward_flag == 0:
-    args.output_dir += "/img_reward_{}/".format(args.reward_filter)
-  else:
-    args.output_dir += "/prev_reward_{}/".format(args.reward_filter)
-  args.output_dir += start_log + data_log + "/" + learning_log + coeff_log
-  if args.v_flag == 1:
-    value_log = "_v_lr" + str(args.v_lr) + "_b" + str(args.v_batch_size)
-    value_log += "_s" + str(args.v_step)
-    args.output_dir += value_log
+
+  # if args.reward_flag == 0:
+  #   args.output_dir += "/img_reward_{}/".format(args.reward_filter)
+  # else:
+  #   args.output_dir += "/prev_reward_{}/".format(args.reward_filter)
+  
+  args.output_dir += "_" + data_log  + "dpok/" + "constant/" + "rw_" +str(args.reward_weight) + "_kl_" + str(args.kl_weight)
+
 
 
 def _calculate_reward_ir(
@@ -1013,6 +997,12 @@ def main():
       log_with=args.report_to,
       project_config=accelerator_project_config,
   )
+  accelerator.init_trackers(
+      project_name="SDGFN",
+      config=vars(args),
+      init_kwargs={"wandb": {"entity": "swish"}}
+      )
+  accelerator.trackers[0].run.name = f'DPOK_{args.single_prompt}_rw{args.reward_weight}'
 
   # Make one log on every process with the configuration for debugging.
   logging.basicConfig(
@@ -1462,6 +1452,11 @@ def main():
       lr_scheduler.step()
       if accelerator.is_main_process:
         if count % 5 == 0:
+
+            if count % 100 == 0:
+              for i, img in enumerate(image):
+                accelerator.log({"Image {}".format(i): wandb.Image(img)}, step=count)
+
             images = [transform(x).unsqueeze(0).to(accelerator.device) for x in image]
             # Extract features
             with torch.no_grad():
