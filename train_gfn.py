@@ -1030,6 +1030,12 @@ def main():
       log_with=args.report_to,
       project_config=accelerator_project_config,
   )
+  
+  accelerator.init_trackers(
+    project_name="SDGFN", 
+    config=vars(args),
+    init_kwargs={"wandb": {"entity": "swish"}}
+    )
 
   # Make one log on every process with the configuration for debugging.
   logging.basicConfig(
