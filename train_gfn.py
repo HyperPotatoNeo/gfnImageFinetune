@@ -506,8 +506,13 @@ def parse_args():
   parser.add_argument(
       "--save_interval",
       type=int,
-      default=100,
+      default=1000,
       help="save model every save_interval steps",
+  )
+  parser.add_argument(
+    "--use_replay",
+    type=int,
+    default=0,
   )
   parser.add_argument(
       "--num_samples",
@@ -865,6 +870,7 @@ def _save_model(args, count, is_ddp, accelerator, unet):
     unet_to_save.save_attn_procs(save_path)
 
 
+
 def _collect_rollout(args, pipe, is_ddp, batch, calculate_reward, state_dict, unet_copy):
   """Collects trajectories."""
   for _ in range(args.g_step):
@@ -884,6 +890,7 @@ def _collect_rollout(args, pipe, is_ddp, batch, calculate_reward, state_dict, un
       ) = pipe.forward_collect_traj_ddim(prompt=batch, is_ddp=is_ddp, unet_copy=unet_copy, gfn=True, output_type = 'pil')
       reward_list = []
       txt_emb_list = []
+
       for i in range(len(batch)):
         reward, txt_emb = calculate_reward(image_latents[i], batch[i])
         reward_list.append(reward)
@@ -1046,6 +1053,31 @@ def _train_policy_func(
   tpfdata.tot_p_loss += loss.item() / policy_steps
 
 
+def subsample_state_dict(state_dict, K_prime):
+    # Extract final rewards and reshape them to get one reward per image
+    final_rewards = state_dict["final_reward"].reshape(50,-1).permute(1,0).mean(-1) # Assuming final_reward is flattened
+    
+    # Compute sampling probabilities proportional to the exponential of the rewards
+    exp_rewards = torch.exp(final_rewards.to(torch.float32))
+    sampling_probs = exp_rewards / exp_rewards.sum()
+    
+    # Sample indices based on the computed probabilities
+    sampled_indices = torch.multinomial(sampling_probs, K_prime, replacement=False)
+    
+    # Initialize sub_state_dict
+    sub_state_dict = {}
+    
+    
+    # Subsample each tensor in the state_dict
+    for key, value in state_dict.items():
+        if key == "prompt":
+            sub_state_dict[key] = [state_dict[key][i] for i in sampled_indices]
+        else:
+          B = value.shape[0]
+          sub_state_dict[key] = state_dict[key].reshape(50, B//50, *state_dict[key].shape[1:])[:,sampled_indices].reshape(-1, *state_dict[key].shape[1:])
+    
+    return sub_state_dict
+
 def main():
   args = parse_args()
   if args.non_ema_revision is not None:
@@ -1076,9 +1108,9 @@ def main():
       init_kwargs={"wandb": {"entity": "swish"}}
       )
   if args.annealing == 1:
-    accelerator.trackers[0].run.name = f'GFN_{args.single_prompt}_min_rw{args.min_rw}_max_rw{args.max_rw}_annealing'
+    accelerator.trackers[0].run.name = f'GFN_{args.single_prompt}_min_rw{args.min_rw}_max_rw{args.max_rw}_annealing_kl{args.kl_weight}'
   else:
-    accelerator.trackers[0].run.name = f'GFN_{args.single_prompt}_rw{args.reward_weight}'
+    accelerator.trackers[0].run.name = f'GFN_{args.single_prompt}_rw{args.reward_weight}_kl{args.kl_weight}'
 
 
   # Make one log on every process with the configuration for debugging.
@@ -1469,9 +1501,27 @@ def main():
     batch = _get_batch(
         data_iter_loader, _my_data_iterator, prompt_list, args, accelerator
     )
-    image = _collect_rollout(args, pipe, is_ddp, batch, calculate_reward, state_dict, unet_copy)
-    _trim_buffer(buffer_size, state_dict)
 
+
+    image = _collect_rollout(args, pipe, is_ddp, batch, calculate_reward, state_dict, unet_copy)
+    
+  # log_prob, kl_regularizer = pipe.forward_calculate_logprob(
+  #     prompt_embeds=batch_promt_embeds.cuda(),
+  #     latents=batch_state.cuda(),
+  #     next_latents=batch_next_state.cuda(),
+  #     ts=batch_timestep.cuda(),
+  #     unet_copy=None,#unet_copy,
+  #     is_ddp=is_ddp,
+  # )    
+
+
+    _trim_buffer(buffer_size, state_dict)
+    if args.use_replay:
+      sub_state_dict = subsample_state_dict(state_dict, 10)
+    else:
+      assert(args.buffer_size == 500)
+      sub_state_dict = state_dict
+    
     if args.v_flag == 1:
       tot_val_loss = 0
       value_optimizer.zero_grad()
@@ -1502,7 +1552,7 @@ def main():
           with accelerator.no_sync(unet):
             _train_policy_func(
                 args,
-                state_dict,
+                sub_state_dict,
                 pipe,
                 unet_copy,
                 is_ddp,
@@ -1516,7 +1566,7 @@ def main():
         else:
           _train_policy_func(
               args,
-              state_dict,
+              sub_state_dict,
               pipe,
               unet_copy,
               is_ddp,
